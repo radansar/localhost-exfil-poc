@@ -3,7 +3,7 @@
 Three browser-to-localhost exfil channels tested on Safari 26.5 (macOS 26.5)
 
 | Channel | How | Safari | Cert needed |
-|---|---|---|---|---|
+|---|---|---|---|
 | `<img>` HTTP | Identifier in URL query string; Safari loads HTTP images from an HTTPS page (passive mixed-content) | ✅ | No |
 | TLS SNI | Identifier hex-encoded in the SNI hostname; extracted from the raw ClientHello before any cert check | ✅ | No |
 | HTTPS fetch | Full bidirectional HTTP; Safari has no gate on HTTPS-to-localhost from a public HTTPS origin | ✅ | Yes — domain must resolve to 127.0.0.1 with a browser-trusted cert |
