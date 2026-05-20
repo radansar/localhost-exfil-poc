@@ -31,7 +31,7 @@ Usage:
 No external dependencies. Python 3.9+.
 """
 
-import argparse, os, socket, ssl, sys, threading
+import argparse, json, os, platform, socket, ssl, sys, threading
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
@@ -72,7 +72,20 @@ def dispatch(raw, addr, scheme):
         ch = "IMG " if scheme == "http" else "HTTPS"
         print(f"\n[{ts()}] {ch}  src={addr[0]}:{addr[1]}")
         print(f"  id = {identifier!r}")
-    body = f'{{"received":true,"id":{repr(identifier)}}}'.encode()
+
+    if scheme == "https":
+        payload = {
+            "id": identifier,
+            "received_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "hostname": socket.gethostname(),
+            "user": os.environ.get("USER") or os.environ.get("USERNAME") or "unknown",
+            "os": platform.platform(),
+            "cwd": os.getcwd(),
+        }
+        body = json.dumps(payload, indent=2).encode()
+    else:
+        body = json.dumps({"received": True, "id": identifier}).encode()
+
     return http_response("200 OK", {"Content-Type": "application/json"}, body)
 
 

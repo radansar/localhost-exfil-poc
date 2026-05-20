@@ -142,8 +142,18 @@ document.getElementById('httpsSend').addEventListener('click', async () => {
   write(log, `→ ${url}`, 'tag');
   const r = await doFetch(url, { mode: 'cors' });
   if (r.ok) {
-    write(log, `✓ HTTP ${r.status} — bidirectional. Server response:`, 'ok');
-    write(log, `  ${r.body}`, 'ok');
+    write(log, `✓ HTTP ${r.status} — server responded with:`, 'ok');
+    try {
+      const d = JSON.parse(r.body);
+      write(log, `  id          : ${d.id}`);
+      write(log, `  received_at : ${d.received_at}`);
+      write(log, `  hostname    : ${d.hostname}`);
+      write(log, `  user        : ${d.user}`);
+      write(log, `  os          : ${d.os}`);
+      write(log, `  cwd         : ${d.cwd}`);
+    } catch(_) {
+      write(log, `  ${r.body}`);
+    }
   } else {
     write(log, `✗ ${r.name}: ${r.msg}`, 'err');
     write(log, '  Check: cert trusted? domain resolves to 127.0.0.1? server running with --cert/--key?', 'err');
