@@ -72,13 +72,15 @@ function write(el, text, cls) {
   el.appendChild(d);
 }
 
-async function doFetch(url) {
+async function doFetch(url, opts) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 7000);
   try {
-    await fetch(url, { mode: 'no-cors', cache: 'no-store', signal: ctrl.signal });
+    const res = await fetch(url, { cache: 'no-store', signal: ctrl.signal, ...(opts || { mode: 'no-cors' }) });
     clearTimeout(t);
-    return { ok: true };
+    let body = null;
+    try { body = await res.text(); } catch(_) {}
+    return { ok: true, status: res.status, body };
   } catch(e) {
     clearTimeout(t);
     return { ok: false, name: e.name, msg: e.message };
