@@ -2,10 +2,10 @@
 
 Two browser-to-localhost exfil channels that require no certificate and no local configuration.
 
-| Channel | How | Works on |
+| Channel | How
 |---|---|---|
-| `<img>` HTTP | Identifier in URL query string; Safari loads HTTP images from localhost even from an HTTPS page | Safari |
-| TLS SNI | Identifier hex-encoded in the SNI hostname; extracted from the raw TLS ClientHello before any cert check | Safari + Chrome |
+| `<img>` HTTP | Identifier in URL query string; Safari loads HTTP images from localhost even from an HTTPS page
+| TLS SNI | Identifier hex-encoded in the SNI hostname; extracted from the raw TLS ClientHello before any cert check |
 
 ## Run
 
