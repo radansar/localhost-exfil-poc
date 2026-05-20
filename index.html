@@ -46,6 +46,22 @@
 <button id="sniSend">Send via SNI</button>
 <div class="log" id="sniLog">…</div>
 
+<!-- ── Channel 3: HTTPS ───────────────────────────────────── -->
+<h2>Channel 3 — HTTPS fetch  <span style="color:#888;font-weight:normal">(Safari · requires trusted cert)</span></h2>
+<p class="note">
+  Full bidirectional HTTP over TLS. Safari places no gate on HTTPS-to-localhost from a public HTTPS page.<br>
+  Domain must resolve to 127.0.0.1 with a browser-trusted certificate.<br>
+  <strong>Testing:</strong> use mkcert (<code>mkcert -install</code> + generate cert for <code>localhost</code>).<br>
+  <strong>Production:</strong> any domain with A record → 127.0.0.1 and a valid Let's Encrypt cert.
+</p>
+
+<label>Identifier</label>
+<input id="httpsId" value="hello-from-https">
+<label>Domain:port <span style="color:#aaa">(resolves to 127.0.0.1, valid cert)</span></label>
+<input id="httpsTarget" value="localhost:8443">
+<button id="httpsSend">Send via HTTPS</button>
+<div class="log" id="httpsLog">…</div>
+
 <script>
 // ── helpers ──────────────────────────────────────────────────────────────────
 function write(el, text, cls) {
@@ -113,6 +129,24 @@ document.getElementById('sniSend').addEventListener('click', async () => {
       write(log, `  ${r.name} (expected — SNI arrived before TLS rejected)`, 'err');
       write(log, '  ✓ check server.py stdout', 'ok');
     }
+  }
+});
+
+// ── Channel 3 ────────────────────────────────────────────────────────────────
+document.getElementById('httpsSend').addEventListener('click', async () => {
+  const id  = document.getElementById('httpsId').value.trim();
+  const tgt = document.getElementById('httpsTarget').value.trim();
+  const log = document.getElementById('httpsLog');
+  log.textContent = '';
+  const url = `https://${tgt}/track?id=${encodeURIComponent(id)}`;
+  write(log, `→ ${url}`, 'tag');
+  const r = await doFetch(url, { mode: 'cors' });
+  if (r.ok) {
+    write(log, `✓ HTTP ${r.status} — bidirectional. Server response:`, 'ok');
+    write(log, `  ${r.body}`, 'ok');
+  } else {
+    write(log, `✗ ${r.name}: ${r.msg}`, 'err');
+    write(log, '  Check: cert trusted? domain resolves to 127.0.0.1? server running with --cert/--key?', 'err');
   }
 });
 </script>
